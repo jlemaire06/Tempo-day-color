@@ -6,15 +6,20 @@
     Obtain Tempo color for a day, using the RTE API Tempo Like Supply Contract.
 
   Steps
-  1. Connect to a local network using Wifi.
+  1. Connect to a local network using a Wifi Access Point.
   2. Send an HTTP GET Request to the RTE API, to obtain an access Token.
   3. Init the time system with a time zone string, to handle local times.
-  4. If current local time is required, call an NTP server to init the RTC clock.
-  5. Send HTTP¨GET requests to the RTE API, to obtain different Tempo colors.
+  4. If the current local time is required, call an NTP server to init the RTC clock.
+  5. Send HTTP¨GET requests to the RTE API, to obtain the Tempo colors.
 
   NB
   - In steps 2 and 5, decode the JSON data sent by the RTE API.
   - The results are displayed on the serial monitor.
+  - Use robust Wifi connection :
+    . restart the ESP32 when the connections don't succeed ;
+    . automatic Wifi reconnection when accidentally lost.
+  - If required, use a robust connection to the NTP server :
+    . restart the ESP32 when the connections don't succeed.
 
   References
   - ESP32-DevKitC V4 and ESP32-WROOM-32UE :
@@ -23,6 +28,7 @@
     . https://randomnerdtutorials.com/solved-failed-to-connect-to-esp32-timed-out-waiting-for-packet-header/
   - Wifi :
     . https://randomnerdtutorials.com/esp32-useful-wi-fi-functions-arduino/
+    . https://randomnerdtutorials.com/solved-reconnect-esp32-to-wifi/
   - Current time :
     . https://randomnerdtutorials.com/esp32-date-time-ntp-client-server-arduino/
     . https://randomnerdtutorials.com/esp32-ntp-timezones-daylight-saving/
@@ -38,6 +44,8 @@
     . https://arduinojson.org/v6/doc/
     . https://arduinojson.org/v6/assistant/
     . https://arduinojson.org/v6/how-to/use-arduinojson-with-httpclient/
+  - Watch doc timer (WDT)
+    . https://iotassistant.io/esp32/enable-hardware-watchdog-timer-esp32-arduino-ide/
 
 /***********************************************************************************
   Libraries and types
@@ -47,24 +55,27 @@
 #include <time.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
 /***********************************************************************************
   Constants
 ***********************************************************************************/
 
 // Local network access point
-const char *SSID = "--------";
-const char *PWD = "--------"; 
+const char *WIFI_SSID = "......";
+const char *WIFI_PASSWORD = "......";
+const uint32_t WIFI_TIMEOUT = 20; // s
 
 // NTP server (=>UTC time) and Time zone
 const char* NTP_SERVER = "pool.ntp.org";  // Server address (or "ntp.obspm.fr", "ntp.unice.fr", ...) 
 const char* TIME_ZONE = "CET-1CEST,M3.5.0,M10.5.0/3"; // Europe/Paris time zone 
+const uint32_t NTP_TIMEOUT = 20; // s
 
 // RTE basic authorization
-const char *AUTH = "--------";
+const char *AUTH = "YjY5N2VmMzktNDczYS00NTY5LTk2OGMtNjRmNTU0ZGZlMDgzOjU2MDA0NjQ5LWU4MTEtNDZiZS05NGMyLTVmMGQ5YjhlYjM2Nw==";
 
-// Debug print
-// #define DEBUG_PRINT
+// Print flag
+// #define PRINT_FLAG
 
 /***********************************************************************************
   Global variables
@@ -78,6 +89,30 @@ JsonDocument doc;
   Tool functions
 ***********************************************************************************/
 
+void initWiFi(const char *ssid, const char *password, const uint32_t timeOut) 
+{
+  esp_task_wdt_init(timeOut, true);  // Enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL);            // Add current thread to WDT watch
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(1000);
+  esp_task_wdt_delete(NULL);         // Delete the WDT for the current thread
+#ifdef PRINT_FLAG
+  Serial.printf("Wifi connected : IP=%s RSSI=%d\n", WiFi.localIP().toString(), WiFi.RSSI());
+#endif
+}
+
+void WiFiDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+#ifdef PRINT_FLAG
+  Serial.printf("Wifi disconnected : Reason=%d\n", info.wifi_sta_disconnected.reason);
+#endif
+  if (info.wifi_sta_disconnected.reason != 8) // Not a call to Wifi.disconnect()
+  {
+    initWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT);
+  }
+}
+
 void setTimeZone(const char *timeZone)
 {
   // To work with Local time (custom and RTC)
@@ -85,16 +120,22 @@ void setTimeZone(const char *timeZone)
   tzset();
 }
 
-void initRTC(const char *timeZone)
+void initRTC(const char *NTPServer, const char *timeZone, const uint32_t timeOut)
 {
   // Set RTC with Local time, using an NTP server
-  configTime(0, 0, "pool.ntp.org"); // To get UTC time
+  esp_task_wdt_init(timeOut, true);  // Enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL);            // Add current thread to WDT watch
+  configTime(0, 0, NTPServer);       // To get UTC time
   tm time;
-  getLocalTime(&time);    
-  setTimeZone(timeZone);  // Transform to Local time
+  while (!getLocalTime(&time)) delay(1000); // UTC time
+  setTimeZone(timeZone);             // Transform to Local time
+  esp_task_wdt_delete(NULL);         // Delete the WDT for the current thread
+#ifdef PRINT_FLAG
+  Serial.println("RTC clock initialized with Local time, using an NTP server");
+#endif
 }
 
-bool getCustomTime(const int year, const int month, const int day, const int hour, const int minute, const int second, tm *timePtr)
+bool getCustomTime(int year, int month, int day, int hour, int minute, int second, tm *timePtr)
 {
   // Set a time (date) without DST indication
   *timePtr = {0};
@@ -122,13 +163,13 @@ bool getAccessToken(String *tokenPtr)
   bool okToken = false;
   String url = "https://digital.iservices.rte-france.com/token/oauth/";
   String auth = "Basic " + String(AUTH);
-#ifdef DEBUG_PRINT
+#ifdef PRINT_FLAG
   Serial.printf("URL : %s\nAuthorization : %s\n", url.c_str(), auth.c_str());
 #endif
 
   // HTTP Get request
   http.begin(url);
-	http.setTimeout(1000);
+  http.setTimeout(1000);
   http.addHeader("Authorization", auth);
   http.addHeader("Accept", "application/json");
 
@@ -140,7 +181,7 @@ bool getAccessToken(String *tokenPtr)
     {
       serializeJsonPretty(doc, payload);
       const char* token = doc["access_token"];
-#ifdef DEBUG_PRINT
+#ifdef PRINT_FLAG
       Serial.printf("Payload : \n%s\nToken : %s\n", payload, token);
 #endif
       *tokenPtr = String(token);
@@ -166,13 +207,13 @@ bool getTempoDayColor(const int year, const int month, const int day, const Stri
   strcpy((char*)(url.c_str())+169, ":00"); 
   url[137]='&';
   String auth = "Bearer " + *tokenPtr;
-#ifdef DEBUG_PRINT
+#ifdef PRINT_FLAG
   Serial.printf("URL : %s\nAuthorization : %s\n", url.c_str(), auth.c_str());
 #endif
 
   // HTTP Get request
   http.begin(url);
-	http.setTimeout(1000);
+  http.setTimeout(1000);
   http.addHeader("Authorization", auth);
   http.addHeader("Accept", "application/json");
 
@@ -185,7 +226,7 @@ bool getTempoDayColor(const int year, const int month, const int day, const Stri
     {
       serializeJsonPretty(doc, payload);
       const char* color = doc["tempo_like_calendars"]["values"][0]["value"];
-#ifdef DEBUG_PRINT
+#ifdef PRINT_FLAG
       Serial.printf("Payload : \n%s\nColor : %s\n", payload, color);
 #endif
       *colorPtr = String(color);
@@ -212,11 +253,8 @@ void setup()
   while (!Serial);
 
   // Connect to the Wifi access point 
-  WiFi.begin(SSID, PWD);
-  while (WiFi.status() != WL_CONNECTED); 
-#ifdef DEBUG_PRINT
-  Serial.printf("IP=%s RSSI=%d\n", WiFi.localIP().toString(), WiFi.RSSI());
-#endif
+  WiFi.onEvent(WiFiDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  initWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT);
   Serial.println("\nACCESS TO THE RTE API \"TEMPO LIKE SUPPLY CONTRACT\"");
 
   // Get access token
@@ -240,12 +278,9 @@ void setup()
   if (getTempoDayColor(2024, 2, 12, &token, &color)) Serial.printf("Day J Tempo color : %s\n", color.c_str());
   if (getTempoDayColor(2024, 2, 13, &token, &color)) Serial.printf("Day J+1 Tempo color : %s\n", color.c_str());
 
-  // Init RTC with Local time using an NTP server
-  initRTC(TIME_ZONE);
-  char buf[30];
-
   // Current day Tempo color
   Serial.println("\nGET CURRENT DAY TEMPO COLOR");
+  initRTC(NTP_SERVER, TIME_ZONE, NTP_TIMEOUT); // Init the RTC with Local time, using an NTP server
   tm time;
   getLocalTime(&time);
   int year = time.tm_year+1900;
