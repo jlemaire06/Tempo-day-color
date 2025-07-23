@@ -72,7 +72,7 @@ const char* TIME_ZONE = "CET-1CEST,M3.5.0,M10.5.0/3"; // Europe/Paris time zone
 const uint32_t NTP_TIMEOUT = 20; // s
 
 // RTE basic authorization
-const char *AUTH = "YjY5N2VmMzktNDczYS00NTY5LTk2OGMtNjRmNTU0ZGZlMDgzOjU2MDA0NjQ5LWU4MTEtNDZiZS05NGMyLTVmMGQ5YjhlYjM2Nw==";
+const char *AUTH = "......";
 
 // Print flag
 // #define PRINT_FLAG
