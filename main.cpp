@@ -41,9 +41,9 @@
     . https://randomnerdtutorials.com/esp32-http-get-post-arduino/
   - ArduinoJSON :
     . https://github.com/bblanchon/ArduinoJson
-    . https://arduinojson.org/v6/doc/
-    . https://arduinojson.org/v6/assistant/
-    . https://arduinojson.org/v6/how-to/use-arduinojson-with-httpclient/
+    . https://arduinojson.org/v7/doc/
+    . https://arduinojson.org/v7/assistant/
+    . https://arduinojson.org/v7/how-to/use-arduinojson-with-httpclient/
   - Watch doc timer (WDT)
     . https://iotassistant.io/esp32/enable-hardware-watchdog-timer-esp32-arduino-ide/
 
@@ -71,8 +71,11 @@ const char* NTP_SERVER = "pool.ntp.org";  // Server address (or "ntp.obspm.fr", 
 const char* TIME_ZONE = "CET-1CEST,M3.5.0,M10.5.0/3"; // Europe/Paris time zone 
 const uint32_t NTP_TIMEOUT = 20; // s
 
-// RTE basic authorization
-const char *AUTH = "......";
+// RTE API Tempo Like Supply Contract
+const char *TOKEN_URL = "https://digital.iservices.rte-france.com/token/oauth/";
+const char *BASIC_AUTH = "Basic YjY5N2VmMzktNDczYS00NTY5LTk2OGMtNjRmNTU0ZGZlMDgzOjU2MDA0NjQ5LWU4MTEtNDZiZS05NGMyLTVmMGQ5YjhlYjM2Nw==";
+const char *TEMPO_URL = "https://digital.iservices.rte-france.com/open_api/tempo_like_supply_contract/v1/tempo_like_calendars?start_date=YYYY-MM-DDThh:mm:sszzzzzz&end_date=YYYY-MM-DDThh:mm:sszzzzzz";
+const char *UNDEFINED = "UNDEFINED"; // Undefined color
 
 // Print flag
 // #define PRINT_FLAG
@@ -81,9 +84,7 @@ const char *AUTH = "......";
   Global variables
 ***********************************************************************************/
 
-HTTPClient http;
-static char payload[1000];
-JsonDocument doc; 
+JsonDocument doc;
 
 /***********************************************************************************
   Tool functions
@@ -157,89 +158,40 @@ bool getCustomTime(int year, int month, int day, int hour, int minute, int secon
   return true;
 }
 
-bool getAccessToken(String *tokenPtr)
+bool getJsonDocumentFromHTTPRequest(const char *url, const char *auth)
 {
-  // Local variables
-  bool okToken = false;
-  String url = "https://digital.iservices.rte-france.com/token/oauth/";
-  String auth = "Basic " + String(AUTH);
-#ifdef PRINT_FLAG
-  Serial.printf("URL : %s\nAuthorization : %s\n", url.c_str(), auth.c_str());
-#endif
-
-  // HTTP Get request
-  http.begin(url);
+  bool ok = false;
+  HTTPClient http;
+  http.useHTTP10();  // to prevent chunked transfer encoding
   http.setTimeout(1000);
-  http.addHeader("Authorization", auth);
+  http.begin(url);
   http.addHeader("Accept", "application/json");
-
-  // Send and decode
-  if (http.GET() == 200) 
-  {
-    strcpy(payload, http.getString().c_str());
-    if (!deserializeJson(doc, payload))
-    {
-      serializeJsonPretty(doc, payload);
-      const char* token = doc["access_token"];
-#ifdef PRINT_FLAG
-      Serial.printf("Payload : \n%s\nToken : %s\n", payload, token);
-#endif
-      *tokenPtr = String(token);
-      okToken = true;
-    }
-  }
+  if (auth != NULL) http.addHeader("Authorization", auth);
+  if ((http.GET() == 200) && !deserializeJson(doc, http.getStream())) ok = true;
   http.end();
-  return okToken;
+  return ok;
 }
 
-bool getTempoDayColor(const int year, const int month, const int day, const String *tokenPtr, String *colorPtr)
+const char* getTempoDayColor(const int year, const int month, const int day, const char *auth)
 {
-  // Local variables
-  bool okColor = false;
-  String url = "https://digital.iservices.rte-france.com/open_api/tempo_like_supply_contract/v1/tempo_like_calendars?start_date=YYYY-MM-DDThh:mm:sszzzzzz&end_date=YYYY-MM-DDThh:mm:sszzzzzz";
-
-  // Copy dates in URL with ISO 8601 format
+   // Copy dates in URL with ISO 8601 format
   tm timeStart; getCustomTime(year, month, day, 0, 0, 0, &timeStart);
   tm timeEnd; getCustomTime(year, month, day+1, 0, 0, 0, &timeEnd);
-  strftime((char*)(url.c_str())+112, 23, "%FT%T%z", &timeStart);
-  strftime((char*)(url.c_str())+147, 23, "%FT%T%z", &timeEnd);
-  strcpy((char*)(url.c_str())+134, ":00");
-  strcpy((char*)(url.c_str())+169, ":00"); 
-  url[137]='&';
-  String auth = "Bearer " + *tokenPtr;
+  char url[200];
+  strcpy(url, TEMPO_URL);
+  strftime(url+112, 23, "%FT%T%z", &timeStart);
+  strftime(url+147, 23, "%FT%T%z", &timeEnd);
+  strcpy(url+134, ":00");
+  strcpy(url+169, ":00");
+  url[137] = '&'; 
 #ifdef PRINT_FLAG
-  Serial.printf("URL : %s\nAuthorization : %s\n", url.c_str(), auth.c_str());
+  Serial.printf("URL : %s\nAuthorization : %s\n", url, auth);
 #endif
-
-  // HTTP Get request
-  http.begin(url);
-  http.setTimeout(1000);
-  http.addHeader("Authorization", auth);
-  http.addHeader("Accept", "application/json");
-
-  // Send and decode response
-  int code = http.GET();
-  if (code == 200) 
+  if (getJsonDocumentFromHTTPRequest(url, auth))
   {
-    strcpy(payload, http.getString().c_str());
-    if (!deserializeJson(doc, payload))
-    {
-      serializeJsonPretty(doc, payload);
-      const char* color = doc["tempo_like_calendars"]["values"][0]["value"];
-#ifdef PRINT_FLAG
-      Serial.printf("Payload : \n%s\nColor : %s\n", payload, color);
-#endif
-      *colorPtr = String(color);
-      okColor = true;
-    }
+    return (doc["tempo_like_calendars"]["values"][0]["value"] | UNDEFINED);
   }
-  else if (code == 400 )
-  {
-    *colorPtr = "UNDEFINED";
-    okColor = true;
-  }
-  http.end();
-  return okColor;
+  return UNDEFINED;
 }
 
 /***********************************************************************************
@@ -257,38 +209,39 @@ void setup()
   initWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT);
   Serial.println("\nACCESS TO THE RTE API \"TEMPO LIKE SUPPLY CONTRACT\"");
 
-  // Get access token
   Serial.println("\nGET ACCESS TOKEN");
-  String token;
-  if (getAccessToken(&token)) Serial.printf("Token : %s\n", token.c_str());
+  if (getJsonDocumentFromHTTPRequest(TOKEN_URL, BASIC_AUTH))
+  {
+    Serial.printf("Token : %s\n", (const char *)doc["access_token"]);
+
+    // Bearer authorization using the Access Token
+    char auth[100];
+    strcpy(auth, "Bearer ");
+    strcpy(auth+7, doc["access_token"]);
+
+    // Set time zone (not necessary after InitRTC)
+    setTimeZone(TIME_ZONE);
+
+    // Tempo days color
+    Serial.println("\nCUSTOM DAY TEMPO COLOR");
+    Serial.println("12/2/2024 :");
+    Serial.printf("Day J-1 Tempo color : %s\n", getTempoDayColor(2024, 2, 11, auth));
+    Serial.printf("Day J Tempo color : %s\n", getTempoDayColor(2024, 2, 12, auth));
+    Serial.printf("Day J+1 Tempo color : %s\n", getTempoDayColor(2024, 2, 13, auth));
+    
+    Serial.println("\nCURRENT DAY TEMPO COLOR");
+    initRTC(NTP_SERVER, TIME_ZONE, NTP_TIMEOUT); // Init the RTC with Local time, using an NTP server
+    tm t;
+    getLocalTime(&t);
+    Serial.printf("%d/%d/%d :\n", t.tm_mday, t.tm_mon+1, t.tm_year+1900);
+    Serial.printf("Day J Tempo color : %s\n", getTempoDayColor(t.tm_year+1900, t.tm_mon+1, t.tm_mday , auth));
+    Serial.printf("Day J Tempo color : %s\n", getTempoDayColor(t.tm_year+1900, t.tm_mon+1, t.tm_mday+2 , auth));
+  }
   else 
   {
     Serial.println("Error : cannot obtain access token");
-    exit(0);
+    esp_deep_sleep_start();
   }
-
-  // Set time zone (not necessary after InitRTC)
-  setTimeZone(TIME_ZONE);
-
-  // Custom day Tempo color
-  Serial.println("\nGET CUSTOM DAY TEMPO COLOR");
-  String color;
-  Serial.println("12/2/2024 :");
-  if (getTempoDayColor(2024, 2, 11, &token, &color)) Serial.printf("Day J-1 Tempo color : %s\n", color.c_str());
-  if (getTempoDayColor(2024, 2, 12, &token, &color)) Serial.printf("Day J Tempo color : %s\n", color.c_str());
-  if (getTempoDayColor(2024, 2, 13, &token, &color)) Serial.printf("Day J+1 Tempo color : %s\n", color.c_str());
-
-  // Current day Tempo color
-  Serial.println("\nGET CURRENT DAY TEMPO COLOR");
-  initRTC(NTP_SERVER, TIME_ZONE, NTP_TIMEOUT); // Init the RTC with Local time, using an NTP server
-  tm time;
-  getLocalTime(&time);
-  int year = time.tm_year+1900;
-  int month = time.tm_mon+1;
-  int day = time.tm_mday;
-  Serial.printf("%d/%d/%d :\n", day, month, year);
-  if (getTempoDayColor(year, month, day , &token, &color)) Serial.printf("Day J Tempo color : %s\n", color.c_str());
-  if (getTempoDayColor(year, month, day+2 , &token, &color)) Serial.printf("Day J+2 Tempo color : %s\n", color.c_str());
 }
 
 void loop()
