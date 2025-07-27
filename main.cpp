@@ -71,20 +71,17 @@ const char* NTP_SERVER = "pool.ntp.org";  // Server address (or "ntp.obspm.fr", 
 const char* TIME_ZONE = "CET-1CEST,M3.5.0,M10.5.0/3"; // Europe/Paris time zone 
 const uint32_t NTP_TIMEOUT = 20; // s
 
+// HTTP requests timeout
+const uint16_t HTTP_TIMEOUT = 10000; // ms
+
 // RTE API Tempo Like Supply Contract
 const char *TOKEN_URL = "https://digital.iservices.rte-france.com/token/oauth/";
-const char *BASIC_AUTH = "Basic YjY5N2VmMzktNDczYS00NTY5LTk2OGMtNjRmNTU0ZGZlMDgzOjU2MDA0NjQ5LWU4MTEtNDZiZS05NGMyLTVmMGQ5YjhlYjM2Nw==";
+const char *BASIC_AUTH = "Basic ......";
 const char *TEMPO_URL = "https://digital.iservices.rte-france.com/open_api/tempo_like_supply_contract/v1/tempo_like_calendars?start_date=YYYY-MM-DDThh:mm:sszzzzzz&end_date=YYYY-MM-DDThh:mm:sszzzzzz";
 const char *UNDEFINED = "UNDEFINED"; // Undefined color
 
 // Print flag
 // #define PRINT_FLAG
-
-/***********************************************************************************
-  Global variables
-***********************************************************************************/
-
-JsonDocument doc;
 
 /***********************************************************************************
   Tool functions
@@ -96,7 +93,7 @@ void initWiFi(const char *ssid, const char *password, const uint32_t timeOut)
   esp_task_wdt_add(NULL);            // Add current thread to WDT watch
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(1000);
+  while (WiFi.status() != WL_CONNECTED) continue;;
   esp_task_wdt_delete(NULL);         // Delete the WDT for the current thread
 #ifdef PRINT_FLAG
   Serial.printf("Wifi connected : IP=%s RSSI=%d\n", WiFi.localIP().toString(), WiFi.RSSI());
@@ -128,7 +125,7 @@ void initRTC(const char *NTPServer, const char *timeZone, const uint32_t timeOut
   esp_task_wdt_add(NULL);            // Add current thread to WDT watch
   configTime(0, 0, NTPServer);       // To get UTC time
   tm time;
-  while (!getLocalTime(&time)) delay(1000); // UTC time
+  while (!getLocalTime(&time)) continue; // UTC time
   setTimeZone(timeZone);             // Transform to Local time
   esp_task_wdt_delete(NULL);         // Delete the WDT for the current thread
 #ifdef PRINT_FLAG
@@ -158,18 +155,53 @@ bool getCustomTime(int year, int month, int day, int hour, int minute, int secon
   return true;
 }
 
-bool getJsonDocumentFromHTTPRequest(const char *url, const char *auth)
+bool getJsonDocumentFromHTTPRequest(const char *url, const char *auth, JsonDocument &doc)
 {
-  bool ok = false;
+  bool okJson = false;
   HTTPClient http;
-  http.useHTTP10();  // to prevent chunked transfer encoding
-  http.setTimeout(1000);
-  http.begin(url);
+  http.useHTTP10(true);  // To prevent chunked transfer encoding
+#ifdef PRINT_FLAG
+  Serial.printf("Url : %s\n", url);
+#endif
+  http.setTimeout(HTTP_TIMEOUT);
+  http.begin(url); // http request
   http.addHeader("Accept", "application/json");
-  if (auth != NULL) http.addHeader("Authorization", auth);
-  if ((http.GET() == 200) && !deserializeJson(doc, http.getStream())) ok = true;
+  if (auth != NULL) 
+  {
+    http.addHeader("Authorization", auth);   
+#ifdef PRINT_FLAG
+    Serial.printf("Authorization : %s\n", auth);
+#endif 
+  }
+  int httpCode = http.GET();
+  if (httpCode > 0)
+  {
+    if (httpCode == HTTP_CODE_OK) 
+    {
+      DeserializationError errorJson = deserializeJson(doc, http.getStream());
+      if (!errorJson) okJson = true;
+      else 
+      {
+#ifdef PRINT_FLAG
+        Serial.printf("Json error : %s\n", errorJson.c_str());
+#endif
+      }
+    }
+    else 
+    {
+#ifdef PRINT_FLAG
+      Serial.printf("HTTP code : %d\n", httpCode);
+#endif
+    }
+  }
+  else 
+  {
+#ifdef PRINT_FLAG
+    Serial.printf("HTTP GET failed, error: %s\n", http.errorToString(httpCode).c_str());
+#endif
+  }
   http.end();
-  return ok;
+  return okJson;
 }
 
 const char* getTempoDayColor(const int year, const int month, const int day, const char *auth)
@@ -184,10 +216,8 @@ const char* getTempoDayColor(const int year, const int month, const int day, con
   strcpy(url+134, ":00");
   strcpy(url+169, ":00");
   url[137] = '&'; 
-#ifdef PRINT_FLAG
-  Serial.printf("URL : %s\nAuthorization : %s\n", url, auth);
-#endif
-  if (getJsonDocumentFromHTTPRequest(url, auth))
+  JsonDocument doc;
+  if (getJsonDocumentFromHTTPRequest(url, auth, doc))
   {
     return (doc["tempo_like_calendars"]["values"][0]["value"] | UNDEFINED);
   }
@@ -202,46 +232,52 @@ void setup()
 {
   // Open serial port
   Serial.begin(115200);
-  while (!Serial);
+  while (!Serial) continue;
+  delay(200);
 
   // Connect to the Wifi access point 
   WiFi.onEvent(WiFiDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   initWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT);
   Serial.println("\nACCESS TO THE RTE API \"TEMPO LIKE SUPPLY CONTRACT\"");
 
+  // Access token
   Serial.println("\nGET ACCESS TOKEN");
-  if (getJsonDocumentFromHTTPRequest(TOKEN_URL, BASIC_AUTH))
+  bool okToken = false;
+  char auth[100];
   {
-    Serial.printf("Token : %s\n", (const char *)doc["access_token"]);
+    JsonDocument doc;
+    if (getJsonDocumentFromHTTPRequest(TOKEN_URL, BASIC_AUTH, doc))
+    {
+      Serial.printf("Token : %s\n", (const char *)doc["access_token"]);
+      strcpy(auth, "Bearer ");
+      strcpy(auth+7, doc["access_token"]);
+      okToken = true;
+    }
+  }
 
-    // Bearer authorization using the Access Token
-    char auth[100];
-    strcpy(auth, "Bearer ");
-    strcpy(auth+7, doc["access_token"]);
-
+  // Days color
+  if (okToken)
+  {
     // Set time zone (not necessary after InitRTC)
     setTimeZone(TIME_ZONE);
 
-    // Tempo days color
+    // Custom Tempo days color
     Serial.println("\nCUSTOM DAY TEMPO COLOR");
     Serial.println("12/2/2024 :");
     Serial.printf("Day J-1 Tempo color : %s\n", getTempoDayColor(2024, 2, 11, auth));
     Serial.printf("Day J Tempo color : %s\n", getTempoDayColor(2024, 2, 12, auth));
     Serial.printf("Day J+1 Tempo color : %s\n", getTempoDayColor(2024, 2, 13, auth));
     
+    // Current Tempo day color
     Serial.println("\nCURRENT DAY TEMPO COLOR");
     initRTC(NTP_SERVER, TIME_ZONE, NTP_TIMEOUT); // Init the RTC with Local time, using an NTP server
     tm t;
     getLocalTime(&t);
     Serial.printf("%d/%d/%d :\n", t.tm_mday, t.tm_mon+1, t.tm_year+1900);
     Serial.printf("Day J Tempo color : %s\n", getTempoDayColor(t.tm_year+1900, t.tm_mon+1, t.tm_mday , auth));
-    Serial.printf("Day J Tempo color : %s\n", getTempoDayColor(t.tm_year+1900, t.tm_mon+1, t.tm_mday+2 , auth));
+    Serial.printf("Day J+2 Tempo color : %s\n", getTempoDayColor(t.tm_year+1900, t.tm_mon+1, t.tm_mday+2 , auth));
   }
-  else 
-  {
-    Serial.println("Error : cannot obtain access token");
-    esp_deep_sleep_start();
-  }
+  else Serial.println("Error : cannot obtain access token");
 }
 
 void loop()
